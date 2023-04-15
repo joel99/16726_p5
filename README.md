@@ -83,3 +83,34 @@ Better than the rest. The onset of the second image appear to lapse over more sa
 
 ## 3. Scribbles
 
+I drew my own sample but for some reason the dataloader didn't respect it :( and just rolled with the given sketches. Here we just use StyleGAN W+ which produced the best results in the previous section.
+
+### Sketch 1
+
+![p3_sketch_1](./output/draw/0_data.png)
+![p3_synth_1](./output/draw/0_stylegan_w+_perc-0.01_l1-10-l2-0.001_8000.png)
+
+### Sketch 2 (my own sample, but bugged?)
+
+![p3_sketch_2](./output/draw/1_data.png)
+![p3_synth_2](./output/draw/1_stylegan_w+_perc-0.01_l1-10-l2-0.001_8000.png)
+
+Yeah, this looks like the first sketch first some reason... (prob a dataloader bug)
+
+### Sketch 3
+
+![p3_sketch_3](./output/draw/2_data.png)
+![p3_synth_3](./output/draw/2_stylegan_w+_perc-0.01_l1-10-l2-0.001_8000.png)
+
+### Sketch 4
+
+![p3_sketch_4](./output/draw/3_data.png)
+![p3_synth_4](./output/draw/3_stylegan_w+_perc-0.01_l1-10-l2-0.001_8000.png)
+
+### Sketch 5
+![p3_sketch_5](./output/draw/4_data.png)
+![p3_synth_5](./output/draw/4_stylegan_w+_perc-0.01_l1-10-l2-0.001_8000.png)
+
+It's apparent from the poor quality of sketch 4 and 5 that the optimization does heavily weight the constraints. Hence, lighter guides are visually more pleasing. In some cases it looks like cat features are pasted on wherever the guide isn't. It's a bit confusing to me how these outputs are even on the manifold at all.
+
+However this intuition has holes. For example in image 1, only some whiskers are drawn, but the generated whiskers are many more and moreover don't even appear to be in the same place as the guidance. Whiskers are also possibly trying to appear even in the dense sketches. It is possible the guidance is simply ignored in this case, and manifold adherance reigns.

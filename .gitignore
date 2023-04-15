@@ -1,5 +1,5 @@
 slurm_logs
-output/draw/
+# output/draw
 output/project/
 output/interpolate/*.png
 wandb
