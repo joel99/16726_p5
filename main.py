@@ -17,9 +17,17 @@ import imageio
 import torchvision.utils as vutils
 from torchvision.models import vgg19
 
+import pytorch_lightning as pl
+import wandb
+
+
 from dataloader import get_data_loader
 
-NUM_W_PLUS_SPACE = 18 # from https://arxiv.org/pdf/1904.03189.pdf
+def get_device():
+    if torch.cuda.is_available():
+        return torch.device('cuda')
+    else:
+        return torch.device('cpu')
 
 def build_model(name):
     if name.startswith('vanilla'):
@@ -72,13 +80,13 @@ class Wrapper(nn.Module):
 # create a module to normalize input image so we can easily put it in a
 # nn.Sequential
 class Normalization(nn.Module):
-    def __init__(self, mean, std):
+    def __init__(self, mean: torch.Tensor, std: torch.Tensor):
         super(Normalization, self).__init__()
         # .view the mean and std to make them [C x 1 x 1] so that they can
         # directly work with image Tensor of shape [B x C x H x W].
         # B is batch size. C is number of channels. H is height and W is width.
-        self.mean = torch.tensor(mean).view(-1, 1, 1)
-        self.std = torch.tensor(std).view(-1, 1, 1)
+        self.mean = mean.view(-1, 1, 1)
+        self.std = std.view(-1, 1, 1)
 
     def forward(self, img):
         # normalize img
@@ -87,34 +95,48 @@ class Normalization(nn.Module):
 
 class PerceptualLoss(nn.Module):
     def __init__(self, add_layer=['conv_5']):
+        device = get_device()
         super().__init__()
         cnn_normalization_mean = torch.tensor([0.485, 0.456, 0.406]).to(device)
         cnn_normalization_std = torch.tensor([0.229, 0.224, 0.225]).to(device)
-        norm = Normalization(cnn_normalization_mean, cnn_normalization_std)
+        self.norm = Normalization(cnn_normalization_mean, cnn_normalization_std)
         cnn = vgg19(pretrained=True).features.to(device).eval()
 
-        # TODO (Part 1): implement the Perceptual/Content loss
-        #                hint: hw4
-        # You may split the model into different parts and store each part in 'self.model'
-        self.model = nn.ModuleList()
+        conv_num = 0
+        last_layer_end = 0
+        pieces = []
+        assert len(add_layer) > 0, 'add_layer should not be empty'
+        add_layer = sorted(add_layer)
+        for i in range(len(cnn)):
+            if isinstance(cnn[i], nn.Conv2d):
+                if 'conv_%d' % conv_num in add_layer:
+                    pieces.append(cnn[last_layer_end:i+1])
+                    last_layer_end = i+1
+                conv_num += 1
+            if len(pieces) == len(add_layer):
+                break
+        self.model = nn.ModuleList(pieces)
 
     def forward(self, pred, target):
 
         if isinstance(target, tuple):
             target, mask = target
+        else:
+            mask = None
+        pred = self.norm(pred)
+        target = self.norm(target)
 
         loss = 0.
         for net in self.model:
             pred = net(pred)
             target = net(target)
-
-            # TODO (Part 1): implement the forward call for perceptual loss
-            #                free feel to rewrite the entire forward call based on your
-            #                implementation in hw4
-            # TODO (Part 3): if mask is not None, then you should mask out the gradient
-            #                based on 'mask==0'. You may use F.adaptive_avg_pool2d() to
-            #                resize the mask such that it has the same shape as the feature map.
-            pass
+            if mask is not None:
+                resize_mask = F.adaptive_avg_pool2d(mask, pred.shape[2:])
+            cur_loss = F.mse_loss(pred, target, reduction='none')
+            if mask is not None:
+                cur_loss = cur_loss * resize_mask
+                # cur_loss = cur_loss[resize_mask]
+            loss = loss + cur_loss.mean()
         return loss
 
 class Criterion(nn.Module):
@@ -128,17 +150,19 @@ class Criterion(nn.Module):
 
     def forward(self, pred, target):
         """Calculate loss of prediction and target. in p-norm / perceptual  space"""
+        perc_loss = self.perc(pred, target)
         if self.mask:
             target, mask = target
-            # TODO (Part 3): loss with mask
-            pass
         else:
-            # TODO (Part 1): loss w/o mask
-            pass
-        return loss
+            mask = None
+        l1_loss = F.l1_loss(pred, target, reduction='none')
+        if mask is not None:
+            l1_loss = l1_loss * mask
+        l1_loss = l1_loss.mean()
+        return self.perc_wgt * perc_loss + self.l1_wgt * l1_loss, self.perc_wgt * perc_loss, self.l1_wgt * l1_loss
 
 
-def save_images(image, fname, col=8):
+def save_images(image, fname, col=8, step=0, save_wandb=True, caption=""):
     image = image.cpu().detach()
     image = image / 2 + 0.5
 
@@ -149,6 +173,10 @@ def save_images(image, fname, col=8):
     if fname is not None:
         os.makedirs(os.path.dirname(fname), exist_ok=True)
         imageio.imwrite(fname + '.png', image)
+    if save_wandb:
+        if caption == "":
+            caption = fname
+        wandb.log({'samples': [wandb.Image(image, caption=caption)]}, step=step)
     return image
 
 
@@ -178,49 +206,86 @@ def sample_noise(dim, device, latent, model, N=1, from_mean=False):
              Tensor on device in shape of (N, 1, dim) if latent == w
              Tensor on device in shape of (N, nw, dim) if latent == w+
     """
-    def sample_w(N, draws=1):
-        z = torch.randn(N * draws, dim, device=device)
+    def sample_w(N, draws=1, w_plus=False):
+        z = torch.randn(N * draws, dim, device=device) # out = N nw dim
         w: torch.Tensor = model.mapping(z, None)
-        return w.view(N, draws, dim).mean(dim=1)
+        w = w.view(N, draws, w.size(1), w.size(2))
+        if not w_plus:
+            w = w[:, :, :1]
+        return w.mean(dim=1) # N D Ws Dim -> N Ws Dim
     if latent == 'z':
         vector = torch.randn(N, dim, device=device) if not from_mean else torch.zeros(N, dim, device=device)
-    elif latent == 'w':
+    elif latent in ['w', 'w+']:
         if from_mean:
-            vector = sample_w(N, 10000)
+            vector = sample_w(N, 10000, w_plus=latent == 'w+')
         else:
-            vector = sample_w(N)
-    elif latent == 'w+':
-        if from_mean:
-            vector = sample_w(N * NUM_W_PLUS_SPACE, 10000)
-            vector = vector.view(N, NUM_W_PLUS_SPACE, dim)
-        else:
-            vector = sample_w(N * NUM_W_PLUS_SPACE)
-            vector = vector.view(N, NUM_W_PLUS_SPACE, dim)
+            vector = sample_w(N, w_plus=latent == 'w+')
     else:
         raise NotImplementedError('%s is not supported' % latent)
     return vector
 
 
-def optimize_para(wrapper, param, target, criterion, num_step, save_prefix=None, res=False):
+def optimize_para(
+    wrapper,
+    param,
+    target,
+    criterion,
+    num_step,
+    save_prefix=None,
+    res=False,
+    l2_weight=0.,
+    caption_prefix="",
+):
     """
     wrapper: image = wrapper(z / w/ w+): an interface for a generator forward pass.
     param: z / w / w+
     target: (1, C, H, W)
     criterion: loss(pred, target)
     """
+    device = get_device()
     delta = torch.zeros_like(param)
     delta = delta.requires_grad_().to(device)
     optimizer = FullBatchLBFGS([delta], lr=.1, line_search='Wolfe')
     iter_count = [0]
     def closure():
+        optimizer.zero_grad()
+
+        image = wrapper(param + delta)
+        loss, perc_loss, l1_loss = criterion(image, target)
+        if l2_weight:
+            l2_loss = l2_weight * torch.sum(delta ** 2)
+            loss += l2_loss
+        else:
+            l2_loss = 0
+
         iter_count[0] += 1
-        # TODO (Part 1): Your optimiztion code. Free free to try out SGD/Adam.
-        if iter_count[0] % 250 == 0:
+        if iter_count[0] % 500 == 0:
             # visualization code
+            log_dict = {'loss': loss.item()}
+            if l2_weight:
+                log_dict['l2_loss'] = l2_loss.item()
+            if l1_loss:
+                log_dict['l1_loss'] = l1_loss.item()
+            if perc_loss:
+                log_dict['perc_loss'] = perc_loss.item()
+            wandb.log(log_dict, step=iter_count[0])
             print('iter count {} loss {:4f}'.format(iter_count, loss.item()))
             if save_prefix is not None:
                 iter_result = image.data.clamp_(-1, 1)
-                save_images(iter_result, save_prefix + '_%d' % iter_count[0])
+                uses_losses = []
+                if l1_loss:
+                    uses_losses.append('L1')
+                if perc_loss:
+                    uses_losses.append('Perc')
+                if l2_weight:
+                    uses_losses.append('L2 Norm')
+                caption = f"{'+'.join(uses_losses)}: "
+                if caption_prefix:
+                    caption = caption_prefix + ': ' + caption
+                save_images(
+                    iter_result, save_prefix + '_%d' % iter_count[0], step=iter_count[0],
+                    caption=caption
+                )
         return loss
 
     loss = closure()
@@ -228,7 +293,8 @@ def optimize_para(wrapper, param, target, criterion, num_step, save_prefix=None,
     while iter_count[0] <= num_step:
         options = {'closure': closure, 'max_ls': 10}
         loss, _, lr, _, F_eval, G_eval, _, _ = optimizer.step(options)
-    image = wrapper(param)
+    image = wrapper(param + delta)
+    image.data.clamp_(-1, 1)
     return param + delta, image
 
 
@@ -250,6 +316,7 @@ def sample(args):
 
 def project(args):
     # load images
+    device = get_device()
     loader = get_data_loader(args.input, args.resolution, is_train=False)
 
     # define and load the pre-trained model
@@ -262,13 +329,15 @@ def project(args):
         target = data.to(device)
         save_images(data, 'output/project/%d_data' % idx, 1)
         param = sample_noise(z_dim, device, args.latent, model)
-        optimize_para(wrapper, param, target, criterion, args.n_iters,
-                      'output/project/%d_%s_%s_%g' % (idx, args.model, args.latent, args.perc_wgt))
+        caption_prefix = f"{args.latent}"
+        latents, out = optimize_para(wrapper, param, target, criterion, args.n_iters,
+                      'output/project/%d_%s_%s_perc-%g_l1-%g-l2-%g' % (idx, args.model, args.latent, args.perc_wgt, args.l1_wgt, args.l2_wgt), l2_weight=args.l2_wgt, caption_prefix=caption_prefix)
         if idx >= 0:
             break
 
 
 def draw(args):
+    device = get_device()
     # define and load the pre-trained model
     model, z_dim = build_model(args.model)
     wrapper = Wrapper(args, model, z_dim)
@@ -280,11 +349,17 @@ def draw(args):
         rgb, mask = rgb.to(device), mask.to(device)
         save_images(rgb, 'output/draw/%d_data' % idx, 1)
         save_images(mask, 'output/draw/%d_mask' % idx, 1)
-        # TODO (Part 3): optimize sketch 2 image
-        #                hint: Set from_mean=True when sampling noise vector
+        param = sample_noise(z_dim, device, args.latent, model, from_mean=True)
+        latents, out = optimize_para(wrapper, param, (rgb, mask), criterion, args.n_iters,
+            'output/draw/%d_%s_%s_perc-%g_l1-%g-l2-%g' % (idx, args.model, args.latent, args.perc_wgt, args.l1_wgt, args.l2_wgt),
+            l2_weight=args.l2_wgt
+        )
+        # if idx >= 0:
+            # break
 
 
 def interpolate(args):
+    device = get_device()
     model, z_dim = build_model(args.model)
     wrapper = Wrapper(args, model, z_dim)
 
@@ -294,9 +369,9 @@ def interpolate(args):
     for idx, (image, _) in enumerate(loader):
         save_images(image, 'output/interpolate/%d' % (idx))
         target = image.to(device)
-        param = sample_noise(z_dim, device, args.latent, model, from_mean=True)
-        param, recon = optimize_para(wrapper, param, target, criterion, args.n_iters)
-        save_images(recon, 'output/interpolate/%d_%s_%s' % (idx, args.model, args.latent))
+        param = sample_noise(z_dim, device, args.latent, model)
+        param, recon = optimize_para(wrapper, param, target, criterion, args.n_iters, l2_weight=args.l2_wgt)
+        save_images(recon, 'output/interpolate/%d_%s_%s_%g' % (idx, args.model, args.latent, args.l2_wgt))
         if idx % 2 == 0:
             src = param
             continue
@@ -304,9 +379,9 @@ def interpolate(args):
         alpha_list = np.linspace(0, 1, 50)
         image_list = []
         with torch.no_grad():
-            # TODO (Part 2): interpolation code
-            #                hint: Write a for loop to append the convex combinations to image_list
-        save_gifs(image_list, 'output/interpolate/%d_%s_%s' % (idx, args.model, args.latent))
+            for alpha in alpha_list:
+                image_list.append(wrapper(alpha * src + (1 - alpha) * dst))
+        save_gifs(image_list, 'output/interpolate/%d_%s_%s_%g' % (idx, args.model, args.latent, args.l2_wgt))
         if idx >= 3:
             break
     return
@@ -320,20 +395,24 @@ def parse_arg():
     parser.add_argument('--model', type=str, default='stylegan', choices=['vanilla', 'stylegan'])
     parser.add_argument('--mode', type=str, default='sample', choices=['sample', 'project', 'draw', 'interpolate'])
     parser.add_argument('--latent', type=str, default='z', choices=['z', 'w', 'w+'])
-    parser.add_argument('--n_iters', type=int, default=1000, help="number of optimization steps in the image projection")
+    parser.add_argument('--n_iters', type=int, default=8000, help="number of optimization steps in the image projection")
     parser.add_argument('--perc_wgt', type=float, default=0.01, help="perc loss weight")
     parser.add_argument('--l1_wgt', type=float, default=10., help="L1 pixel loss weight")
+    parser.add_argument('--l2_wgt', type=float, default=0.0, help="L2 delta norm weight")
     parser.add_argument('--resolution', type=int, default=64, help='Resolution of images')
-    parser.add_argument('--input', type=str, default='data/cat/*.png', help="path to the input image")
+    parser.add_argument('--input', type=str, default='data/sketch/*.png', help="path to the input image") # Quick hack, easier to replace default than figure out how to launch correctly through slurm...
+    # parser.add_argument('--input', type=str, default='data/cat/*.png', help="path to the input image")
     return parser.parse_args()
 
 
 if __name__ == '__main__':
+    # pl.seed_everything(0)
     args = parse_arg()
-    if torch.cuda.is_available():
-        device = 'cuda'
-    else:
-        device = 'cpu'
+    wandb.init(
+        project='16726_p5',
+        config=args,
+        name=f'{args.model}-{args.mode}-{args.latent}-perc_{args.perc_wgt}-l1_{args.l1_wgt}-l2_{args.l2_wgt}',
+    )
     if args.mode == 'sample':
         sample(args)
     elif args.mode == 'project':

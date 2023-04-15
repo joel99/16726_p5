@@ -1,73 +1,85 @@
-# 16726_p4
+# 16726_p5
 
-## Content optimization
+## 1. Generator inversion
 
-Optimizing lower layers (`conv_3`, `conv_4`) preserves content nearly perfectly, but this breaks down phasically at extremely high layers (`conv_7`, `conv_8`). We generate 2 random seeds for both just to be safe.
+We compare
+- StyleGAN (z, w, w+) vs Vanilla GAN (z)
+- From our experiments with StyleGAN in HW4, we judge the default of conv_5 perceptual loss to be reasonable, so we directly compare combinations of Lp (L1), perceptual loss, and L2 of delta regularization. We also note initializing from an average of many samples hurts performance, especially for Vanilla GAN, which barely starts learning, so we keep this option off.
 
-Layer             |  Image (Seed 0)  | Image (Seed 1)
-:---:|:---:|:---:
-`conv_3` |  ![phipps_3_0](./out/rand-seed-0-content-phipps-content_layers-%5B'conv_3'%5D.png) | ![phipps_3_1](./out/rand-seed-1-content-phipps-content_layers-%5B'conv_3'%5D.png)
-`conv_4` |  ![phipps_4_0](./out/rand-seed-0-content-phipps-content_layers-%5B'conv_4'%5D.png) | ![phipps_4_1](./out/rand-seed-1-content-phipps-content_layers-%5B'conv_4'%5D.png)
-`conv_7` |  ![phipps_7_0](./out/rand-seed-0-content-phipps-content_layers-%5B'conv_7'%5D.png) | ![phipps_7_1](./out/rand-seed-1-content-phipps-content_layers-%5B'conv_7'%5D.png)
-`conv_8` |  ![phipps_8_0](./out/rand-seed-0-content-phipps-content_layers-%5B'conv_8'%5D.png) | ![phipps_8_1](./out/rand-seed-1-content-phipps-content_layers-%5B'conv_8'%5D.png)
+We compare latent/model combo at a time, across hyperparameters (2^3 choices of losses to include). We first note early and final results. The wandb report is [here](https://wandb.ai/joelye9/16726_p5/reports/Part-1-Inverse-Projection--Vmlldzo0MDc1NjE3). The loss hyperparameters are
+```
+- Lp/L1 (default weight 10)
+- Perceptual (default weight 0.1)
+- L2 norm (tuned to 1e-3 in early exps)
+```
 
-<!-- repeat 3 more times, with conv_4, 7, 8 -->
-The effect of noise is small (if it matters at all), and the wide range of consistent reconstruction suggests content layer will not be a critical hyperparameter during joint tuning.
+### Target Image
+![p1_target](./figures/p1_data.png)
 
-## Style optimization
+### Vanilla: Z
+![p1_vanilla_z](./figures/p1_vanilla_z.png)
 
-Style produces quite different but all pleasing results for different layers. We show starry night, 2 seeds, for 4 layers (`conv_2`, `conv_3`, `conv_4`, `conv_5`)
+### StyleGAN: Z
 
-Layer             |  Image (Seed 0)  | Image (Seed 1)
-:---:|:---:|:---:
-`conv_2` |  ![starry_2_0](./out/rand-seed-0-style-starry_night-style_layers-%5B'conv_2'%5D-style_weight-1000000.png) | ![starry_2_1](./out/rand-seed-1-style-starry_night-style_layers-%5B'conv_2'%5D-style_weight-1000000.png)
-`conv_3` |  ![starry_3_0](./out/rand-seed-0-style-starry_night-style_layers-%5B'conv_3'%5D-style_weight-1000000.png) | ![starry_3_1](./out/rand-seed-1-style-starry_night-style_layers-%5B'conv_3'%5D-style_weight-1000000.png)
-`conv_4` |  ![starry_4_0](./out/rand-seed-0-style-starry_night-style_layers-%5B'conv_4'%5D-style_weight-1000000.png) | ![starry_4_1](./out/rand-seed-1-style-starry_night-style_layers-%5B'conv_4'%5D-style_weight-1000000.png)
-`conv_5` |  ![starry_5_0](./out/rand-seed-0-style-starry_night-style_layers-%5B'conv_5'%5D-style_weight-1000000.png) | ![starry_5_1](./out/rand-seed-1-style-starry_night-style_layers-%5B'conv_5'%5D-style_weight-1000000.png)
+![p1_stylegan_z](./figures/p1_stylegan_z.png)
 
-The produced style emphasizes much finer arrangements of details at higher layers, which are a bit more consistent with the original style transfer paper. For best results, and also as hinted in code comments, though, we will mix the different layers.
+### StyleGAN: W
 
-The effect of noise does appear to matter; different colors can dominate. However, the overall textural frequency appears consistent.
+![p1_stylegan_w](./figures/p1_stylegan_w.png)
 
+### StyleGAN: W+
 
-# Together
-## Implementation
-I followed the recommended structure and cached activations in the style/content layers, and used MSE to drive towards these cached activations.
-Interestingly, I found noise artifacts if I clipped after each optimization step instead of before. I'm not sure why this occurred.
-
-For tuning, I adjusted the style weight (with the helpful initializations in the comments) by factors of 10 until the style was not overbearing. Thankfully this was only 1 factor of 10.
+![p1_stylegan_w+](./figures/p1_stylegan_wp.png)
 
 
-## Random init 2x2
+### Commentary
+Universally, results are not good without perceptual loss -- the second row is always less faithful than the first. Including L1 loss on top of this improves convergence rates - the first two images of each group are pretty close to the rigth result. L2 norm has the expected effect of subduing some of the green background, though cat likeness is not obviously affected.
 
-Content \ Style | <img src="./data/images/style/starry_night.jpeg" width="200px">) | <img src="./data/images/style/picasso.jpg" width="200px">
-:---:|:---:|:---:
-<img src="./data/images/content/tubingen.jpeg" width="100px"> | ![tubingen_starry](out/rand-seed-0-style-starry_night-style_layers-['conv_2',%20'conv_3',%20'conv_4',%20'conv_5']-style_weight-100000.0-content-tubingen-content_layers-['conv_4'].png) | ![tubingen_picasso](out/rand-seed-0-style-picasso-style_layers-['conv_2',%20'conv_3',%20'conv_4',%20'conv_5']-style_weight-100000.0-content-tubingen-content_layers-['conv_4'].png)
-<img src="./data/images/content/phipps.jpeg" width="100px"> | ![phipps_starry](out/rand-seed-0-style-starry_night-style_layers-['conv_2',%20'conv_3',%20'conv_4',%20'conv_5']-style_weight-100000.0-content-phipps-content_layers-['conv_4'].png) | ![phipps_picasso](out/rand-seed-0-style-picasso-style_layers-['conv_2',%20'conv_3',%20'conv_4',%20'conv_5']-style_weight-100000.0-content-phipps-content_layers-['conv_4'].png)
+Vanilla GAN converges very rapidly, interestingly, but the quality is not good.
 
-If we initialize with the content instead of a random seed:
-Content \ Style | <img src="./data/images/style/starry_night.jpeg" width="200px">) | <img src="./data/images/style/picasso.jpg" width="200px">
-:---:|:---:|:---:
-<img src="./data/images/content/tubingen.jpeg" width="100px"> | ![tubingen_starry](out/init-seed-0-style-starry_night-style_layers-['conv_2',%20'conv_3',%20'conv_4',%20'conv_5']-style_weight-100000.0-content-tubingen-content_layers-['conv_4'].png) | ![tubingen_picasso](out/init-seed-0-style-picasso-style_layers-['conv_2',%20'conv_3',%20'conv_4',%20'conv_5']-style_weight-100000.0-content-tubingen-content_layers-['conv_4'].png)
-<img src="./data/images/content/phipps.jpeg" width="100px"> | ![phipps_starry](out/init-seed-0-style-starry_night-style_layers-['conv_2',%20'conv_3',%20'conv_4',%20'conv_5']-style_weight-100000.0-content-phipps-content_layers-['conv_4'].png) | ![phipps_picasso](out/init-seed-0-style-picasso-style_layers-['conv_2',%20'conv_3',%20'conv_4',%20'conv_5']-style_weight-100000.0-content-phipps-content_layers-['conv_4'].png)
 
-The results are pretty subjective, but I would say that Starry Night results are nicer when initialized from content image. Specifically, the textures appear more consistent within each semantic region, rather than everything splashed everywhere. Picasso / Tubingen is similarly improved, but Picasso x Phipps looks the same.
+## 2. Interpolation
+We trim hyperparameters to now include both losses all the time, but do still toggle regularization. We show no regularization, and then with regularization try the four models.
 
-## Personal examples
+### Vanilla: Z
 
-I adore digital art and took two artists work:
-1. [WLOP](https://www.artstation.com/wlop)
-![WLOP-work](./data/images/style/wlop.jpg)
-1. [Julius Horsthuis](http://www.julius-horsthuis.com/)
-![Julius-work](./data/images/style/horsthuis.jpg)
-As style sources.
+![p2_vanilla_z_noreg_1](./output/interpolate/1_vanilla_z_0.gif)
+![p2_vanilla_z_reg_1](./output/interpolate/1_vanilla_z_0.001.gif)
 
-For targets, I tried those with relatively similar content in different domains.
-![Cathedral of Learning](./data/images/content/cathy.jpg)
-![Gears](./data/images/content/gears.jpg)
+![p2_vanilla_z_reg_3](./output/interpolate/3_vanilla_z_0.gif)
+![p2_vanilla_z_reg_3](./output/interpolate/3_vanilla_z_0.001.gif)
 
-Now we transfer:
-![cathy_wlop](./out/rand-seed-0-style-wlop-style_layers-%5B'conv_2'%2C%20'conv_3'%2C%20'conv_4'%2C%20'conv_5'%5D-style_weight-100000.0-content-cathy-content_layers-%5B'conv_4'%5D.png)
-![gear_horsthuis](./out/rand-seed-0-style-horsthuis-style_layers-%5B'conv_2'%2C%20'conv_3'%2C%20'conv_4'%2C%20'conv_5'%5D-style_weight-100000.0-content-gears-content_layers-%5B'conv_4'%5D.png)
+The interpolation does still appear to work in so far as the in-between samples are still reasonable cat samples for the Vanilla GAN.  Minimal perspective shifting ibilities.
 
-I will say overall, I'm not too happy with these results -- these artworks are so much more than 4 layers of a CNN :).
+### StyleGAN: Z
+
+![p2_stylegan_z_noreg](./output/interpolate/1_stylegan_z_0.gif)
+![p2_stylegan_z_reg](./output/interpolate/1_stylegan_z_0.001.gif)
+
+![p2_stylegan_z_noreg](./output/interpolate/3_stylegan_z_0.gif)
+![p2_stylegan_z_reg](./output/interpolate/3_stylegan_z_0.001.gif)
+
+The interpolation transitions unsatisfactorily for the first pair, particularly when the blue eyes must warp out of existence. Regularization doesn't seem to have a major effect on this.
+
+### StyleGAN: W
+
+![p2_stylegan_w_noreg](./output/interpolate/1_stylegan_w_0.gif)
+![p2_stylegan_w_reg](./output/interpolate/1_stylegan_w_0.001.gif)
+
+![p2_stylegan_w_noreg](./output/interpolate/3_stylegan_w_0.gif)
+![p2_stylegan_w_reg](./output/interpolate/3_stylegan_w_0.001.gif)
+
+The first pair still has a pretty unsatisfactory interpolation.  Really, the onset of the second image is sudden, it doesn't appear like a continuous change.
+
+### StyleGAN: W+
+
+![p2_stylegan_w+_noreg](./output/interpolate/1_stylegan_w+_0.gif)
+![p2_stylegan_w+_reg](./output/interpolate/1_stylegan_w+_0.001.gif)
+
+![p2_stylegan_w+_noreg](./output/interpolate/3_stylegan_w+_0.gif)
+![p2_stylegan_w+_reg](./output/interpolate/3_stylegan_w+_0.001.gif)
+
+Better than the rest. The onset of the second image appear to lapse over more samples, which is something.
+
+## 3. Scribbles
+

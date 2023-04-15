@@ -1,4 +1,11 @@
+slurm_logs
+output/draw/
+output/project/
+output/interpolate/*.png
+wandb
+
 data
+
 pretrained
 
 # Byte-compiled / optimized / DLL files

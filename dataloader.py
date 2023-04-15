@@ -53,6 +53,6 @@ def get_data_loader(data_path, resolution, alpha=False, is_train=False):
     """
     dataset = CustomDataSet(data_path, resolution, alpha)
     dloader = DataLoader(dataset=dataset, batch_size=1, shuffle=is_train, drop_last=is_train,
-                         num_workers=10)
+                         num_workers=6)
 
     return dloader
